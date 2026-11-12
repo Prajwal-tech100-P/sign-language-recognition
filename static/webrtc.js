@@ -3,12 +3,12 @@ class WebRTCHandler {
         this.localStream = null;
         this.peerConnection = null;
         this.room = null;
-        this.userType = 'deaf'; // Default to deaf user
+        this.userType = 'deaf';
 
-        // Get server URL dynamically
+        // Connect to current origin
         const SERVER_URL = window.location.origin;
         this.socket = io(SERVER_URL, {
-            transports: ['websocket'],
+            transports: ['websocket', 'polling'],
             reconnection: true
         });
 
@@ -17,9 +17,7 @@ class WebRTCHandler {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
                 { urls: 'stun:stun1.l.google.com:19302' },
-                { urls: 'stun:stun2.l.google.com:19302' },
-                { urls: 'stun:stun3.l.google.com:19302' },
-                { urls: 'stun:stun4.l.google.com:19302' }
+                { urls: 'stun:stun2.l.google.com:19302' }
             ]
         };
 
@@ -37,11 +35,19 @@ class WebRTCHandler {
         });
 
         // Room controls
-        document.getElementById('createRoom').addEventListener('click', () => this.createRoom());
-        document.getElementById('joinRoom').addEventListener('click', () => {
-            const roomId = document.getElementById('roomInput').value;
-            if (roomId) this.joinRoom(roomId);
-        });
+        const createBtn = document.getElementById('createRoom');
+        if (createBtn) {
+            createBtn.addEventListener('click', () => this.createRoom());
+        }
+
+        const joinBtn = document.getElementById('joinRoom');
+        if (joinBtn) {
+            joinBtn.addEventListener('click', () => {
+                const roomInput = document.getElementById('roomInput');
+                const roomId = roomInput ? roomInput.value.trim() : '';
+                if (roomId) this.joinRoom(roomId);
+            });
+        }
     }
 
     updateUIForUserType() {
@@ -49,127 +55,193 @@ class WebRTCHandler {
         const detectionBox = document.querySelector('.detection-box');
 
         if (this.userType === 'deaf') {
-            detectionControls.style.display = 'flex';
-            detectionBox.style.display = 'block';
+            if (detectionControls) detectionControls.style.display = 'flex';
+            if (detectionBox) detectionBox.style.display = 'block';
         } else {
-            detectionControls.style.display = 'none';
-            detectionBox.style.display = 'none';
+            if (detectionControls) detectionControls.style.display = 'none';
+            if (detectionBox) detectionBox.style.display = 'none';
         }
     }
 
     async setupMediaStream() {
+        if (this.localStream && this.localStream.active) {
+            return true;
+        }
+
         try {
             this.localStream = await navigator.mediaDevices.getUserMedia({
-                video: true,
+                video: {
+                    width: { ideal: 640 },
+                    height: { ideal: 480 },
+                    facingMode: 'user'
+                },
                 audio: true
             });
 
             const localVideo = document.getElementById('localVideo');
-            localVideo.srcObject = this.localStream;
-
+            if (localVideo) {
+                localVideo.srcObject = this.localStream;
+                await localVideo.play().catch(() => {});
+            }
             return true;
         } catch (error) {
-            console.error('Error accessing media devices:', error);
-            alert('Failed to access camera and microphone. Please ensure permissions are granted.');
-            return false;
+            console.warn('Could not access microphone and camera, trying video only:', error);
+            try {
+                this.localStream = await navigator.mediaDevices.getUserMedia({
+                    video: true,
+                    audio: false
+                });
+
+                const localVideo = document.getElementById('localVideo');
+                if (localVideo) {
+                    localVideo.srcObject = this.localStream;
+                    await localVideo.play().catch(() => {});
+                }
+                return true;
+            } catch (err) {
+                console.error('Error accessing video devices:', err);
+                return false;
+            }
         }
     }
 
     async createRoom() {
-        if (!this.localStream && !(await this.setupMediaStream())) return;
-
-        const roomId = Math.random().toString(36).substring(7);
-        this.socket.emit('create', { room: roomId });
-        this.room = roomId;
-        
-        document.getElementById('roomInfo').textContent = `Room ID: ${roomId}`;
-        document.getElementById('roomInput').value = roomId;
+        await this.setupMediaStream();
+        this.socket.emit('create_room');
     }
 
     async joinRoom(roomId) {
-        if (!this.localStream && !(await this.setupMediaStream())) return;
-
-        this.socket.emit('join', { room: roomId });
-        this.room = roomId;
-        
-        document.getElementById('roomInfo').textContent = `Room ID: ${roomId}`;
+        if (!roomId) return;
+        await this.setupMediaStream();
+        this.socket.emit('join_room', roomId);
     }
 
     setupSocketListeners() {
-        this.socket.on('room_created', async (data) => {
-            console.log('Room created:', data.room);
+        this.socket.on('connect', () => {
+            console.log('Connected to server');
+            const conn = document.getElementById('connectionStatus');
+            if (conn) {
+                conn.innerHTML = '<i class="fas fa-check-circle"></i> Connected';
+                conn.className = 'status-value connected';
+            }
+        });
+
+        this.socket.on('disconnect', () => {
+            console.log('Disconnected from server');
+            const conn = document.getElementById('connectionStatus');
+            if (conn) {
+                conn.innerHTML = '<i class="fas fa-times-circle"></i> Disconnected';
+                conn.className = 'status-value disconnected';
+            }
+        });
+
+        this.socket.on('room_created', (roomId) => {
+            console.log('Room created:', roomId);
+            this.room = roomId;
+            const roomInfo = document.getElementById('roomInfo');
+            if (roomInfo) roomInfo.textContent = `Room ID: ${roomId}`;
+            const roomInput = document.getElementById('roomInput');
+            if (roomInput) roomInput.value = roomId;
             this.initializePeerConnection();
         });
 
-        this.socket.on('room_joined', async (data) => {
-            console.log('Room joined:', data.room);
+        this.socket.on('room_joined', (roomId) => {
+            console.log('Room joined:', roomId);
+            this.room = roomId;
+            const roomInfo = document.getElementById('roomInfo');
+            if (roomInfo) roomInfo.textContent = `Room ID: ${roomId}`;
             this.initializePeerConnection();
             this.createAndSendOffer();
         });
 
-        this.socket.on('offer', async (data) => {
+        this.socket.on('user_joined', () => {
+            console.log('Another user joined the room');
+            if (this.peerConnection) {
+                this.createAndSendOffer();
+            }
+        });
+
+        this.socket.on('offer', async (offer) => {
+            if (!offer) return;
+            console.log('Received offer');
             if (!this.peerConnection) {
                 this.initializePeerConnection();
             }
-            await this.peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
-            const answer = await this.peerConnection.createAnswer();
-            await this.peerConnection.setLocalDescription(answer);
-            this.socket.emit('answer', { answer, room: this.room });
-        });
-
-        this.socket.on('answer', async (data) => {
-            await this.peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
-        });
-
-        this.socket.on('ice_candidate', async (data) => {
-            if (data.candidate) {
-                try {
-                    await this.peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
-                } catch (error) {
-                    console.error('Error adding ice candidate:', error);
-                }
+            try {
+                await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+                const answer = await this.peerConnection.createAnswer();
+                await this.peerConnection.setLocalDescription(answer);
+                this.socket.emit('answer', { answer: answer, roomId: this.room });
+            } catch (err) {
+                console.error('Error handling offer:', err);
             }
         });
 
-        this.socket.on('detection_result', (data) => {
-            if (this.userType === 'non-deaf') {
-                this.updateDetectionResult(data);
+        this.socket.on('answer', async (answer) => {
+            if (!answer || !this.peerConnection) return;
+            console.log('Received answer');
+            try {
+                await this.peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+            } catch (err) {
+                console.error('Error handling answer:', err);
             }
+        });
+
+        this.socket.on('ice_candidate', async (candidate) => {
+            if (!candidate || !this.peerConnection) return;
+            try {
+                await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+            } catch (error) {
+                console.error('Error adding ice candidate:', error);
+            }
+        });
+
+        this.socket.on('peer_disconnected', () => {
+            console.log('Peer disconnected');
+            const remoteVideo = document.getElementById('remoteVideo');
+            if (remoteVideo) remoteVideo.srcObject = null;
+        });
+
+        this.socket.on('error', (err) => {
+            alert(err.message || 'Error occurred');
         });
     }
 
     initializePeerConnection() {
+        if (this.peerConnection) {
+            try { this.peerConnection.close(); } catch (e) {}
+        }
         this.peerConnection = new RTCPeerConnection(this.configuration);
 
-        this.localStream.getTracks().forEach(track => {
-            this.peerConnection.addTrack(track, this.localStream);
-        });
+        if (this.localStream) {
+            this.localStream.getTracks().forEach(track => {
+                this.peerConnection.addTrack(track, this.localStream);
+            });
+        }
 
         this.peerConnection.onicecandidate = (event) => {
-            if (event.candidate) {
+            if (event.candidate && this.room) {
                 this.socket.emit('ice_candidate', {
                     candidate: event.candidate,
-                    room: this.room
+                    roomId: this.room
                 });
             }
         };
 
         this.peerConnection.ontrack = (event) => {
             const remoteVideo = document.getElementById('remoteVideo');
-            if (remoteVideo.srcObject !== event.streams[0]) {
+            if (remoteVideo && event.streams[0]) {
                 remoteVideo.srcObject = event.streams[0];
             }
         };
 
         this.peerConnection.onconnectionstatechange = () => {
-            if (this.peerConnection.connectionState === 'connected') {
-                document.getElementById('connectionStatus').innerHTML = 
-                    '<i class="fas fa-check-circle"></i> Connected';
-                document.getElementById('connectionStatus').classList.add('connected');
-            } else {
-                document.getElementById('connectionStatus').innerHTML = 
-                    '<i class="fas fa-times-circle"></i> Disconnected';
-                document.getElementById('connectionStatus').classList.remove('connected');
+            const conn = document.getElementById('connectionStatus');
+            if (conn) {
+                if (this.peerConnection.connectionState === 'connected') {
+                    conn.innerHTML = '<i class="fas fa-check-circle"></i> Connected (Peer)';
+                    conn.className = 'status-value connected';
+                }
             }
         };
     }
@@ -178,39 +250,12 @@ class WebRTCHandler {
         try {
             const offer = await this.peerConnection.createOffer();
             await this.peerConnection.setLocalDescription(offer);
-            this.socket.emit('offer', { offer, room: this.room });
+            this.socket.emit('offer', { offer: offer, roomId: this.room });
         } catch (error) {
             console.error('Error creating offer:', error);
         }
     }
-
-    updateDetectionResult(data) {
-        const resultElement = document.getElementById('detectionResult');
-        const historyElement = document.getElementById('detectionHistory');
-        
-        // Update current result
-        resultElement.innerHTML = `
-            <div class="result-label">${data.label}</div>
-            <div class="result-confidence">Confidence: ${(data.confidence * 100).toFixed(2)}%</div>
-        `;
-        resultElement.classList.add('active');
-
-        // Add to history
-        const time = new Date().toLocaleTimeString();
-        const historyEntry = document.createElement('div');
-        historyEntry.className = 'history-entry';
-        historyEntry.innerHTML = `
-            <span class="time">${time}</span>
-            <span class="label">${data.label}</span>
-            <span class="confidence">${(data.confidence * 100).toFixed(2)}%</span>
-        `;
-        
-        historyElement.insertBefore(historyEntry, historyElement.firstChild);
-        if (historyElement.children.length > 10) {
-            historyElement.removeChild(historyElement.lastChild);
-        }
-    }
 }
 
-// Initialize WebRTC handler
-const webRTC = new WebRTCHandler();
+// Global instance
+window.webRTC = new WebRTCHandler();

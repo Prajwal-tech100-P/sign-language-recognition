@@ -41,19 +41,10 @@ ENV/
 .env.test.local
 .env.production.local
 
-# Dataset and model files
-datasets/
-*.h5
-*.keras
-*.pkl
-
-# Media files
-*.jpg
-*.jpeg
-*.png
-*.gif
-*.mp4
-*.avi
+# Allow models and datasets needed by app
+!models/*.keras
+!processed_dataset/**
+!scripts/dataset/**
 
 # System files
 .DS_Store

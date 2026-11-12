@@ -1,33 +1,3 @@
-const detectionCanvas = document.getElementById('detectionCanvas');
-const detectedSignElement = document.getElementById('detectedSign');
-
-// Create a canvas to capture video frames
-let canvas = null;
-let ctx = null;
-
-// Set canvas size to match model input
-detectionCanvas.width = 64;
-detectionCanvas.height = 64;
-
-let model = null;
-
-// Load the TensorFlow.js model
-async function loadModel() {
-    try {
-        model = await tf.loadLayersModel('/static/model/model.json');
-        console.log('Sign language detection model loaded');
-    } catch (error) {
-        console.error('Error loading model:', error);
-    }
-}
-
-let socket = io('http://localhost:3000', {
-    transports: ['websocket'],
-    reconnection: true,
-    reconnectionAttempts: 5,
-    reconnectionDelay: 1000
-});
-
 let isDetecting = false;
 let detectionInterval = null;
 const FPS = 2; // Frames per second for detection
@@ -36,7 +6,6 @@ const FPS = 2; // Frames per second for detection
 const localVideo = document.getElementById('localVideo');
 const startButton = document.getElementById('startDetection');
 const stopButton = document.getElementById('stopDetection');
-const connectionStatus = document.getElementById('connectionStatus');
 const detectionStatus = document.getElementById('detectionStatus');
 const detectionResult = document.getElementById('detectionResult');
 const detectionHistory = document.getElementById('detectionHistory');
@@ -45,72 +14,11 @@ const detectionHistory = document.getElementById('detectionHistory');
 const captureCanvas = document.createElement('canvas');
 const captureCtx = captureCanvas.getContext('2d');
 
-// Initialize camera
-async function initializeCamera() {
-    try {
-        const constraints = {
-            video: {
-                width: { ideal: 640 },
-                height: { ideal: 480 },
-                facingMode: 'user'
-            },
-            audio: false
-        };
-
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        if (localVideo) {
-            localVideo.srcObject = stream;
-            await localVideo.play();
-            
-            // Set canvas size based on video dimensions
-            captureCanvas.width = localVideo.videoWidth;
-            captureCanvas.height = localVideo.videoHeight;
-            
-            console.log('Camera initialized successfully');
-            return true;
-        }
-    } catch (error) {
-        console.error('Error accessing camera:', error);
-        alert('Failed to access camera. Please check permissions.');
-        return false;
-    }
+function getSocket() {
+    return (window.webRTC && window.webRTC.socket) ? window.webRTC.socket : null;
 }
-
-// Socket event handlers
-socket.on('connect', () => {
-    console.log('Connected to server');
-    updateConnectionStatus(true);
-    enableControls(true);
-});
-
-socket.on('disconnect', () => {
-    console.log('Disconnected from server');
-    updateConnectionStatus(false);
-    enableControls(false);
-    stopDetection();
-});
-
-socket.on('detection_result', (data) => {
-    console.log('Detection result:', data);
-    updateDetectionResult(data);
-    addToHistory(data);
-});
-
-socket.on('detection_error', (data) => {
-    console.error('Detection error:', data.error);
-    showError(data.error);
-});
 
 // UI update functions
-function updateConnectionStatus(connected) {
-    if (connectionStatus) {
-        connectionStatus.innerHTML = connected ? 
-            '<i class="fas fa-check-circle"></i> Connected' :
-            '<i class="fas fa-times-circle"></i> Disconnected';
-        connectionStatus.className = `status-value ${connected ? 'connected' : 'disconnected'}`;
-    }
-}
-
 function updateDetectionStatus(active) {
     if (detectionStatus) {
         detectionStatus.innerHTML = active ?
@@ -138,25 +46,32 @@ function showError(message) {
     }
 }
 
-function enableControls(enabled) {
+function enableControls(cameraReady) {
     if (startButton) {
-        startButton.disabled = !enabled || isDetecting;
+        startButton.disabled = !cameraReady || isDetecting;
     }
     if (stopButton) {
-        stopButton.disabled = !enabled || !isDetecting;
+        stopButton.disabled = !cameraReady || !isDetecting;
     }
 }
 
-// Frame capture and detection
+// Frame capture: extract center square matching the detection box and resize to 64x64
 function captureFrame() {
     if (!localVideo || !localVideo.videoWidth) return null;
 
     try {
-        // Draw the current frame
-        captureCtx.drawImage(localVideo, 0, 0, captureCanvas.width, captureCanvas.height);
+        const vw = localVideo.videoWidth;
+        const vh = localVideo.videoHeight;
+        const minDim = Math.min(vw, vh);
+        const cropSize = minDim * 0.7; // ROI region
+        const sx = (vw - cropSize) / 2;
+        const sy = (vh - cropSize) / 2;
+
+        captureCanvas.width = 64;
+        captureCanvas.height = 64;
+        captureCtx.drawImage(localVideo, sx, sy, cropSize, cropSize, 0, 0, 64, 64);
         
-        // Convert to base64
-        return captureCanvas.toDataURL('image/jpeg', 0.8);
+        return captureCanvas.toDataURL('image/jpeg', 0.85);
     } catch (error) {
         console.error('Error capturing frame:', error);
         return null;
@@ -166,6 +81,11 @@ function captureFrame() {
 // Start detection
 function startDetection() {
     if (!localVideo || isDetecting) return;
+    const socket = getSocket();
+    if (!socket) {
+        showError('Not connected to server');
+        return;
+    }
     
     isDetecting = true;
     updateDetectionStatus(true);
@@ -174,7 +94,11 @@ function startDetection() {
     detectionInterval = setInterval(() => {
         const frame = captureFrame();
         if (frame) {
-            socket.emit('detect_sign', { image: frame });
+            const currentRoom = (window.webRTC && window.webRTC.room) ? window.webRTC.room : null;
+            socket.emit('detect_sign', {
+                image: frame,
+                roomId: currentRoom
+            });
         }
     }, 1000 / FPS);
 }
@@ -193,7 +117,7 @@ function stopDetection() {
 
 // History management
 function addToHistory(result) {
-    if (!detectionHistory) return;
+    if (!detectionHistory || !result) return;
     
     const entry = document.createElement('div');
     entry.className = 'history-entry';
@@ -208,17 +132,31 @@ function addToHistory(result) {
     
     detectionHistory.insertBefore(entry, detectionHistory.firstChild);
     
-    // Limit history items
     while (detectionHistory.children.length > 10) {
         detectionHistory.removeChild(detectionHistory.lastChild);
     }
 }
 
+function setupDetectionSocket() {
+    const socket = getSocket();
+    if (!socket) {
+        setTimeout(setupDetectionSocket, 200);
+        return;
+    }
+
+    socket.on('detection_result', (data) => {
+        updateDetectionResult(data);
+        addToHistory(data);
+    });
+
+    socket.on('detection_error', (data) => {
+        console.error('Detection error:', data.error);
+        showError(data.error);
+    });
+}
+
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', async () => {
-    console.log('Initializing detection system...');
-    
-    // Setup button event listeners
     if (startButton) {
         startButton.addEventListener('click', startDetection);
         startButton.disabled = true;
@@ -228,10 +166,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         stopButton.addEventListener('click', stopDetection);
         stopButton.disabled = true;
     }
-    
-    // Initialize camera
-    const cameraReady = await initializeCamera();
-    if (cameraReady) {
-        console.log('System ready for detection');
+
+    setupDetectionSocket();
+
+    // Auto-initialize camera preview
+    if (window.webRTC) {
+        const ok = await window.webRTC.setupMediaStream();
+        if (ok) {
+            enableControls(true);
+        }
     }
 });

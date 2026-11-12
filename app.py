@@ -63,29 +63,31 @@ def on_create_room():
 def on_join_room(room_id):
     if room_id in rooms:
         join_room(room_id)
-        rooms[room_id]['peers'].append(request.sid)
+        if request.sid not in rooms[room_id]['peers']:
+            rooms[room_id]['peers'].append(request.sid)
         logger.info(f"User {request.sid} joined room: {room_id}")
         emit('room_joined', room_id)
+        emit('user_joined', request.sid, room=room_id, skip_sid=request.sid)
     else:
         emit('error', {'message': 'Room not found'})
 
 @socketio.on('offer')
 def on_offer(data):
-    room_id = data.get('roomId')
+    room_id = data.get('roomId') or data.get('room')
     if room_id in rooms:
         emit('offer', data.get('offer'), room=room_id, skip_sid=request.sid)
         logger.info(f"Offer forwarded in room: {room_id}")
 
 @socketio.on('answer')
 def on_answer(data):
-    room_id = data.get('roomId')
+    room_id = data.get('roomId') or data.get('room')
     if room_id in rooms:
         emit('answer', data.get('answer'), room=room_id, skip_sid=request.sid)
         logger.info(f"Answer forwarded in room: {room_id}")
 
 @socketio.on('ice_candidate')
 def on_ice_candidate(data):
-    room_id = data.get('roomId')
+    room_id = data.get('roomId') or data.get('room')
     if room_id in rooms:
         emit('ice_candidate', data.get('candidate'), room=room_id, skip_sid=request.sid)
         logger.info(f"ICE candidate forwarded in room: {room_id}")
@@ -107,8 +109,8 @@ def process_frame(frame_data):
     try:
         # Convert base64 image to numpy array
         img_data = base64.b64decode(frame_data.split(',')[1])
-        img = Image.open(io.BytesIO(img_data))
-        img = img.resize((224, 224))  # Resize to model input size
+        img = Image.open(io.BytesIO(img_data)).convert('RGB')
+        img = img.resize((64, 64))  # Resize to model input size (64, 64)
         img_array = np.array(img)
         
         # Normalize the image
@@ -118,8 +120,8 @@ def process_frame(frame_data):
         img_array = np.expand_dims(img_array, axis=0)
         
         # Make prediction
-        predictions = model.predict(img_array)
-        predicted_class_index = np.argmax(predictions[0])
+        predictions = model.predict(img_array, verbose=0)
+        predicted_class_index = int(np.argmax(predictions[0]))
         confidence = float(predictions[0][predicted_class_index])
         
         # Get the class label
@@ -154,7 +156,7 @@ def detect_sign(data):
             return
 
         # Emit result to all users in the room
-        room_id = data.get('roomId')
+        room_id = data.get('roomId') or data.get('room')
         if room_id and room_id in rooms:
             emit('detection_result', result, room=room_id)
         else:
